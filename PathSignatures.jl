@@ -4,504 +4,148 @@ using LinearAlgebra
 using TensorOperations
 using Roots
 
-#############################################################################
-# COMMON VARIABLE NAMES
-# T = number of timepoints (length of time series)
+###############################################################################
+
+# COMMON PARAMETER NAMES
+# T+1 = number of timepoints (length of time series), so that derivative is length T
 # N = total dimension of space
 # n = dimension of a single copy of a space
-# m = parameter for Lie group (ie. SO(m))
-# d = number of copies of a space
+# b = parameter for Lie group (ie. SO(b))
+# d = number of copies of a space (is. SO(b)^d)
+# M = truncation level
+
+# COMMON VARIABLE NAMES
+# P = time series (path)
+# BP = batch of time series (array of arrays)
+# p = discrete derivative of time series
+# bp = batch of discrete derivatives
+
+###############################################################################
+
+# TIME SERIES FORMATTING
+# Ordering:
+#	1) Time parameter
+#	2) Lie group parametrization
+#	3) Copies of space
+# R^N : (T, N) array
+# SO(b)^d : (T, b, b, d) array (here, N = dim G = db(b-1)/2)
+
+###############################################################################
+
 
 
 ###############################################################################
-# Description: IteratedIntegral() is a function that takes in an array of
-# cochains (an array of functions), and returns two functions:
-#       IISignature() - computes the signature for a specific term (ie. [1,2,2])
-#       IISignatureL() - computes the signature up to a given level
-#
-# Input: cochains should be an array of functions that takes in a path and evaluates
-#   the cochain on the path - if a path of length T is inputted, the output is a path
-#   of length T-1
-# 
-#   psize() is a function that returns (n_samples, n_features)
-#
-#   preprocess(P) is a function that preprocesses the path before starting
-#       the signature computation (if required)
-#
-# Note: Inputs to the cochains should be type restricted
-function IteratedIntegral(cochains, preprocess)
-     # N = length(cochains)
+## HELPER FUNCTIONS ###########################################################
+###############################################################################
 
-    # Inputs:
-    # P - a path as an (n x d) array; (n - number of points, d - dimension)
-    # term - the term (multi-index) of the signature to calculate (ie. [1,2,2])
-    #
-    # Outputs:
-    # sig - a vector of signature terms used to calculate
-    #   ie. for term = [1,2,2], sig = [S^1, S^{1,2}, S^{1,2,2}]
-    # sigpath - returns the signature path S^{term}(t) (used for recursion)
-    # function IISignature(P, term)
-    #     n = size(P,1)
-    #     level = length(term)
-
-    #     sigpath = zeros(n-1,1)
-    #     eval_cochain = cochains[term[end]](P)
-    #     # dP_end = eval_cc[2:end] - eval_cc[1:end-1]
-
-    #     if level == 1
-    #         integrand = eval_cochain
-    #         sig = zeros(0)
-    #     else
-    #         sig, last_sigpath = IISignature(P, term[1:end-1])
-    #         integrand = last_sigpath.*eval_cochain
-    #     end
-
-    #     sigpath = cumsum(integrand)
-    #     sig = push!(sig, sigpath[end])
-
-    #     return sig, sigpath
-    # end
-
-
-    function sig_forward(sigl, lastQ, K, cur_ind, cur_level, last_level, N)
-
-        if cur_level < last_level
-
-            for i = 1:N-1
-                cur_ind[cur_level] = i
-                Q = cumsum(lastQ .* view(K,:,i))
-                Q = cumsum()
-                sigl[cur_level][cur_ind[1:cur_level]...] = Q[end]
-
-                sig_forward(sigl, Q, K, cur_ind, cur_level+1, last_level, N)
-            end
-
-            # On the last run through, we no longer need the information from
-            # lastQ, so just use that variable instead of allocating more memory
-            cur_ind[cur_level] = N
-            cumsum!(lastQ, lastQ .* view(K,:,N))
-            sigl[cur_level][cur_ind[1:cur_level]...] = lastQ[end]
-
-            sig_forward(sigl, lastQ, K, cur_ind, cur_level+1, last_level, N)
-        else
-
-            for i = 1:N
-                cur_ind[cur_level] = i
-                sigl[cur_level][cur_ind...] = sum(lastQ .* view(K,:,i))
-            end
-
-        end
-    end
-
-
-    function IISignatureL(P, level)
-
-        # P, IT, N, T = preprocess(P)
-        # EIT = enumerate(IT) # create enumerated version of iterator
-
-        T, N = size(P)
-        K = zeros(T-1, N)
-        for i = 1:N
-            K[:,i] = P[2:end,i] - P[1:end-1,i]
-        end
-        # for (i, val) in EIT
-        #     K[:,i] = cochains(P, val...)
-        # end
-
-
-
-        sigl = Array{Array{Float64},1}(undef, level)
-        for i = 1:level
-            sigl[i] = Array{Float64, i}(undef, (ones(Int,i)*N)...)
-        end
-
-        for i = 1:N
-            cur_ind = zeros(Int, level)
-            cur_ind[1] = i
-            Q = cumsum(view(K,:,i))
-            sigl[1][i] = Q[end]
-
-            sig_forward(sigl, Q, K, cur_ind, 2, level, N)
-        end
-
-        return sigl
-
-    end
-
-
-    # Inputs
-    # P1 - path as an (n1 x d) array
-    # P2 - path as an (n2 x d) array
-    # level - level to compute up to
-    function IIKernel(P1, P2, IT, N, level)
-
-        T1 = size(P1)[1]
-        T2 = size(P2)[1]
-        EIT = enumerate(IT)
-
-        K1 = zeros(T1-1, N)
-        K2 = zeros(T2-1, N)
-
-        for (i, val) in EIT
-            K1[:,i] = cochains(P1, val...)
-            K2[:,i] = cochains(P2, val...)
-        end
-
-        # Compute the tensor normalization
-        coeff1 = zeros(level+1)
-        coeff2 = zeros(level+1)
-
-        # Compute normalization for P1
-        K = K1*K1'
-        A = deepcopy(K)
-        coeff1[2] = sum(view(A,:))
-
-        for i = 2:level   
-            cumsum!(A,A,dims=1)
-            cumsum!(A,A,dims=2)
-            A =  @. K*(1 + A)
-            coeff1[i+1] = sum(view(A,:))
-        end
-        norm1 = coeff1[end] + 1
-        c1 = coeff1[2:end] - coeff1[1:end-1]
-        f1(x) = sum(c1.*(x.^((1:level)*2))) + 1 - PHI(sqrt(norm1),4.,1.)
-        # println("norm1=", norm1, ", PHI(sqrt(norm1))=", PHI(sqrt(norm1), 4., 1.), ", f1(0)=", f1(0.), ", f1(2)=", f1(2), ", f1(norm1)=", f1(norm1))
-        lambda1 = find_zero(f1, (0., max(2.,norm1)))
-
-        # Compute normalization for P2
-        K = K2*K2'
-        A = deepcopy(K)
-        coeff2[2] = sum(view(A,:))
-
-        for i = 2:level   
-            cumsum!(A,A,dims=1)
-            cumsum!(A,A,dims=2)
-            A =  @. K*(1 + A)
-            coeff2[i+1] = sum(view(A,:))
-        end
-        norm2 = coeff2[end] + 1
-        c2 = coeff2[2:end] - coeff2[1:end-1]
-        f2(x) = sum(c2.*(x.^((1:level)*2))) + 1 - PHI(sqrt(norm2),4.,1.)
-        # println("norm2=", norm2, ", PHI(sqrt(norm2))=", PHI(sqrt(norm2), 4., 1.), ", f2(0)=", f2(0.), ", f2(2)=", f2(2), ", f2(norm2)=", f2(norm2))
-        lambda2 = find_zero(f2, (0., max(2.,norm2)))
-
-        # coefficient
-        ll = lambda1*lambda2
-
-        # Compute normalized kernel
-        K = K1*K2'
-        A = deepcopy(K)
-
-        for i = 2:level   
-            cumsum!(A,A,dims=1)
-            cumsum!(A,A,dims=2)
-            if i==2
-                A = @. K*(ll^(level-1) + A*ll^level)
-            else
-                A = @. K*(ll^(level-i+1) + A)
-            end
-        end
-
-        R = 1 + sum(view(A,:))
-
-        return R
-    end
-
-
-    function IIKernel_PP(P1, P2, level)
-        P1, IT, N, ~ = preprocess(P1)
-        P2, IT, N, ~ = preprocess(P2)
-
-        return IIKernel(P1, P2, IT, N, level)
-    end
-
-
-    # This computes the unbiased MMD
-    # Input: P1 and P2 are batches of time series of the given type
-    # We assume that the batch index is the first index
-    # For example: size(P1) = (S, T, n1, n2, ..., nl)
-    #   S - size of batch
-    #   T - number of time points for each time series
-    #   n1, n2, ..., nl - number of dimensions for parametrized Lie group
-    #   l - number of parameters required to parametrize Lie group
-
-    # Assumption: Both time series are of the same type
-    function MMDu(P1, P2, level)
-
-        s1 = size(P1)[1]
-        s2 = size(P2)[1]
-        T = size(P2)[2]
-
-        PP1, ccp, IT, N = PreprocessBatchPath(P1)
-        PP2, ~, ~, ~ = PreprocessBatchPath(P2)
-
-        # Compute MMD
-        M = 0.0
-
-        for i = 1:s1-1
-            for j = i+1:s1
-                M += IIKernel(PP1[i,ccp...],PP1[j,ccp...], IT, N, level)*2/(s1*(s1-1))
-            end
-        end
-
-        for i = 1:s2-1
-            for j = i+1:s2
-                M += IIKernel(PP2[i,ccp...],PP2[j,ccp...], IT, N, level)*2/(s2*(s2-1))
-            end
-        end
-
-        for i = 1:s1
-            for j = 1:s2
-                M -= IIKernel(PP1[i,ccp...],PP2[j,ccp...], IT, N, level)*2/(s1*s2)
-            end
-        end
-        return M
-    end
-
-    # Gram matrix
-    function GramMatrix(X, Y, level)
-
-        nS1 = size(X)[1]
-        nS2 = size(Y)[1]
-        # T = size(P)[2]
-        # PP, ccp, IT, N = PreprocessBatchPath(P)
-        XX, IT, N = PreprocessBatchPath(X)
-        YY, IT, N = PreprocessBatchPath(Y)
-
-        K = zeros(nS1, nS2)
-
-        for i = 1:nS1
-            for j = 1:nS2
-                # K[i,j] = IIKernel(PP[i,ccp...], PP[j,ccp...], IT, N, level)
-                K[i,j] = IIKernel(XX[i], YY[j], IT, N, level)
-
-                # if i !=j
-                #     K[j,i] = K[i,j]
-                # end
-            end
-        end
-
-        return K
-
-    end
-
-
-    # Inputs
-    # P1 - path as an (n1 x d) array
-    # P2 - path as an (n2 x d) array
-    # level - level to compute up to
-    function PreprocessPath(P)
-        Pnew, IT, N, ~ = preprocess(P)
-        return Pnew, IT, N
-    end
-
-    # Preprocess a batch of paths and returns the preprocessed paths and the colon indexer
-    function PreprocessBatchPath(P)
-
-        # Preprocess paths
-        S = size(P)[1]
-
-        # Number of timepoints
-        # T = size(P)[2]
-
-        # Get number of dimensions of path
-        l = ndims(P) - 1 # subtract 1 because of batch parameter
-
-        # # Create colon object to index the paths
-        # cc = Array{Colon,1}(undef, l)
-
-        # Process one path to figure out size and get iterator
-        # prep, IT, N, T = preprocess(P[1,cc...])
-        prep, IT, N, T = preprocess(P[1])
-
-        D = ndims(prep)
-
-        # # Find size of preprocessed path
-        # sp = size(prep)
-
-        # # Find number of dimensions of preprocessed path and create colon object
-        # lp = ndims(prep) # don't need to subtract 1 because we only preprocessed a single path
-        # ccp = Array{Colon,1}(undef, lp)
-
-        # Initialize arrays for preprocessed paths
-        # PP = zeros(S, sp...)
-        PP = Array{Array{Float64, D}, 1}(undef, S)
-
-        # Preprocess all paths
-        for i = 1:S
-            # PP[i,ccp...], ~, ~, ~ = preprocess(P[i,cc...])
-            PP[i], ~, ~, ~ = preprocess(P[i])
-        end
-
-        # return PP, ccp, IT, N
-        return PP, IT, N
-    end
-
-
-    # return IISignature, IISignatureL, IIKernel
-    return IISignatureL, IIKernel, IIKernel_PP, PreprocessPath, MMDu, GramMatrix
-end
 
 ###############################################################################
-# Description: Initializes IISignature functions for R^N.
-#
-function initializeII_R()
+# Function: initialize_TA 
+# Description: Initializes array for truncated tensor algebra element.
+# Input 
+# 	N: dimension of underlying vector space
+#	M: truncation level
+# Output 
+# 	A: length M array of arrays, the j^th array is a j dimensional array
+#	   of length N
+###############################################################################
+function initialize_TA(N, M)
 
+	A = Array{Array{Float64},1}(undef, M)
+	for i = 1:M
+	    # A[i] = Array{Float64, i}(undef, (ones(Int,i)*N)...)
+	    A[i] = zeros((ones(Int,i)*N)...)
+	end
+	return A
 
-    function preprocess_R(P)
-        T, d = size(P)
-        return P, 1:d, d, T
-    end
-
-    function cochains_R(P, i)
-        return P[2:end, i] - P[1:end-1, i]
-    end
-
-
-    # IIsig, IIsigL, IIKernel = IteratedIntegral(cochains_R, preprocess)
-    IISignatureL, IIKernel, IIKernel_PP, PreprocessPath, MMDu, GramMatrix = IteratedIntegral(cochains_R, preprocess_R)
-
-    # return IIsig, IIsigL, IIKernel
-    return IISignatureL, IIKernel, IIKernel_PP, PreprocessPath, MMDu, GramMatrix
 end
 
 
 ###############################################################################
-# Description: Initializes IISignature functions for SO(m)^d.
-# Note: The input to these cochains will be of size (T, m, m, d) where
-#   n - parameter of SO(n)
-#   d - number of copies of SO(n)
-#   T - number of time points
-#
-# We have an additional dimension to include the inverse of matrices to make
-# computation faster. In the fourth dimension, a value of 1 means the original
-# matrix, and a value of 2 means the inverse matrix
-#
-# The idea here is to compute the Maurer-Cartan form by A^{-1}dA, and then looking
-# at the forms corresponding to a basis of the Lie algebra so(n), which we choose to
-# be the individual entries on the upper triangular matrix.
-#
-function initializeII_SO()
-
-    function preprocess_SO(P)
-        if ndims(P) == 3
-            T, m, ~ = size(P)
-            d = 1
-            n = div((m^2-m),2)
-            N = n
-
-            Pnew = zeros(T, m, m, 2)
-            Pnew[:,:,:,1] = P
-
-            for t = 1:T-1
-                # Pnew[t,:,:,2] = inv(P[t,:,:])
-                Pnew[t,:,:,2] = real.(log(transpose(P[t,:,:])*P[t+1,:,:]))
-            end
-
-            IT = Array{Tuple{Int, Int}, 1}(undef, N)
-            cc = 1
-            for i = 1:m-1
-                for j = i+1:m
-                    IT[cc] = (i, j)
-                    cc += 1
-                end
-            end
-
-        elseif ndims(P) == 4
-            T, m, ~, d = size(P)
-            n = div((m^2-m),2)
-            N = n*d
-
-            Pnew = zeros(T, m, m, d, 2)
-            Pnew[:,:,:,:,1] = P
-
-            for t = 1:T-1
-                for i = 1:d
-                    # Pnew[t,:,:,i,2] = inv(P[t,:,:,i])
-                    Pnew[t,:,:,i,2] = real.(log(transpose(P[t,:,:,i])*P[t+1,:,:,i]))
-                end
-            end
-
-            IT = Array{Tuple{Int, Int, Int}, 1}(undef, N)
-            cc = 1
-            for k =1:d
-                for i = 1:m-1
-                    for j = i+1:m
-                        IT[cc] = (i, j, k)
-                        cc += 1
-                    end
-                end
-            end
-
-        else
-            error("Incorrect input")
-        end
-
-        return Pnew, IT, N, T
-
-    end
-
-
-    function cochains_SO(P, i, j, k)
-        ev = P[1:end-1,i,j,k,2]
-        # ev = dropdims(sum(P[1:end-1,i,:,k,2].*(P[2:end,:,j,k,1] - P[1:end-1,:,j,k,1]), dims=2), dims=2)
-        return ev
-    end
-
-    function cochains_SO(P, i, j)
-        ev = P[1:end-1,i,j,2]
-        # ev = dropdims(sum(P[1:end-1,i,:,2].*(P[2:end,:,j,1] - P[1:end-1,:,j,1]), dims=2), dims=2)
-        return ev
-    end
-
-
-    IISignatureL, IIKernel, IIKernel_PP, PreprocessPath, MMDu, GramMatrix = IteratedIntegral(cochains_SO,preprocess_SO)
-
-    return IISignatureL, IIKernel, IIKernel_PP, PreprocessPath, MMDu, GramMatrix
-end
-
-
+# Function: multiply_TA!
+# Description: Multiplies two truncated tensor algebra elements, returning
+#	S \otimes T.
+# Input 
+# 	A: variable to hold output of multiplication
+#	S, T: truncated tensor algebra elements to multiply
+#	M: truncation level
 ###############################################################################
-# Description: Multiplies two elements of the tensor algebra up to given level
-#
-
-function TAMult(S, T, N, level)
+function multiply_TA!(A, S, T, M)
 
     # Check if input tensors have required length
-    if length(S) < level || length(T) < level
+    if length(S) < M || length(T) < M
         error("Input tensors not defined up to specified level.")
     end
 
+    N = length(S[1])
+
     # Check if tensors are the correct size
-    for i = 1:level
+    for i = 1:M
         if any(size(S[i]).!=N) || any(size(T[i]).!=N)
             error("Input tensors are not the correct size.")
         end
     end
 
-    TUP1 = Tuple(collect(1:level))
-    TUP2 = Tuple(collect(level+1:2level))
+    TUP1 = Tuple(collect(1:M))
+    TUP2 = Tuple(collect(M+1:2M))
 
     # Initialize output tensor
-    M = Array{Array{Float64},1}(undef, level)
-    for l = 1:level
+    # A = initialize_TA(N,level)
+    for l = 1:M
         # M[l] = zeros((ones(Int,l)*N)...)
-        M[l] = S[l] + T[l]
+        A[l] = S[l] + T[l]
     end
 
-    for l1 = 1:level
-        for l2 = 1:level-l1
-            M[l1+l2] += tensorproduct(S[l1], TUP1[1:l1], T[l2], TUP2[1:l2])
+    for l1 = 1:M
+        for l2 = 1:M-l1
+            A[l1+l2] += tensorproduct(S[l1], TUP1[1:l1], T[l2], TUP2[1:l2])
         end
     end
-
-    return M
 
 end
 
 
-############################################################################
-# Description: Tensor normalization
+###############################################################################
+# Function: tensor_exp!
+# Description: Computes truncated tensor exponential
+# Input 
+# 	A: variable to hold output of multiplication
+#	v: vector to exponentiate
+#	M: truncation level
+###############################################################################
+function tensor_exp!(A, v, M)
+
+	# Check if T is the right size
+	if length(A) != M
+		error("A is the wrong size")
+	end
+
+	N = length(v)
+
+	for i = 1:M
+		if any(size(A[i]).!=N)
+			println(i)
+			error("A is the wrong size")
+		end
+	end
+
+	TUP = Tuple(collect(1:M))
+
+	A[1] = v
+	for m = 2:M
+        A[m] = tensorproduct(A[m-1], TUP[1:m-1], v, TUP[m:m])/(factorial(m))
+	end
+
+end
+
+
+###############################################################################
+# Function: PHI
+# Description: Function used in tensor normalization
+# Input 
+# 	x: argument for function
+#	M, a: parameters of function
+###############################################################################
 function PHI(x, M::Float64, a::Float64)
 
     if x^2 <= M
@@ -511,3 +155,413 @@ function PHI(x, M::Float64, a::Float64)
     end
 end
 
+
+###############################################################################
+## MAIN FUNCTIONS #############################################################
+###############################################################################
+
+###############################################################################
+# Function: discrete_derivative 
+# Description: Computes the discrete derivative of time series.
+# Input 
+# 	P: time series
+# 		(T+1, N) array if dtype = "R"
+# 		(T+1, b, b) or T(b, b, d) array if dtype = "SO"
+# 	dtype: type of time series, currently implemented:
+# 		"R": real valued time series
+# 		"SO": SO(b)^d valued time series (possibly with d = 1)
+# Output 
+# 	p: discrete derivative of time series (T, N) array for all dtype
+###############################################################################
+function discrete_derivative(P, dtype)
+
+	# Real time series
+	if dtype == "R"
+		return P[2:end, :] - P[1:end-1, :]
+
+	# SO(b)^d valued time series
+	elseif dtype == "SO"
+		# If d=1, then the input is a size (T, b, b) array
+		if ndims(P) == 3
+		    T, b, ~ = size(P)
+		    n = div((b^2-b),2)
+		    N = n
+
+		    Pderiv = zeros(T-1, b, b)
+		    p = zeros(T-1, N)
+
+		    for t = 1:T-1
+		        Pderiv[t,:,:] = real.(log(transpose(P[t,:,:])*P[t+1,:,:]))
+		    end
+
+		    dcount = 1
+		    for i = 1:b-1
+		    	for j = i+1:b
+		    		p[:,dcount] = Pderiv[:,i,j]
+		    		dcount += 1
+		    	end
+		    end
+		# If d > 1, then the input is a size (T, b, b, d) array
+		elseif ndims(P) == 4
+		    T, b, ~, d = size(P)
+		    n = div((b^2-b),2)
+		    N = n*d
+
+		    Pderiv = zeros(T-1, b, b, d)
+		    p = zeros(T-1, N)
+
+		    for t = 1:T-1
+		        for i = 1:d
+		            Pderiv[t,:,:,i] = real.(log(transpose(P[t,:,:,i])*P[t+1,:,:,i]))
+		        end
+		    end
+
+		    dcount = 1
+		    for k = 1:d
+			    for i = 1:b-1
+			    	for j = i+1:b
+			    		p[:,dcount] = Pderiv[:,i,j,k]
+			    		dcount += 1
+			    	end
+			    end
+			end
+
+		else
+		    error("Incorrect input. For SO(b)^d valued time series, input must be size 
+		    	(T, b, b) or (T, b, b, d).")
+		end
+	end
+
+	return p
+end
+
+
+#############################################################################
+# Function: batch_discrete_derivative 
+# Description: Batch discrete derivative computation
+# Input 
+# 	BP: batch of time series (array of arrays of time series)
+# 	dtype: type of time series
+# Output 
+# 	bp: batch discrete derivative
+#############################################################################
+function batch_discrete_derivative(BP, dtype)
+
+	S = size(BP)[1] # size of batch
+	CC = Array{Colon,1}(undef, ndims(BP)-1)
+
+	# Initialize the array for the collection of disrete derivatives
+	bp = Array{Array{Float64, 2}, 1}(undef, S)
+
+	for i = 1:S
+		bp[i] = discrete_derivative(BP[i,CC...], dtype)
+	end
+
+	return bp
+end
+
+
+###############################################################################
+# Function: signature 
+# Description: Computes the continuous signature of interpolated time series.
+# Input 
+#	P: time series
+#		(T+1, N) array if dtype = "R"
+#		(T+1, b, b) or T(b, b, d) array if dtype = "SO"
+#	M: truncation level 
+#	dtype: type of time series, currently implemented:
+#		"R": real valued time series
+#		"SO": SO(b)^d valued time series (possibly with d = 1)
+# Output 
+#	S: truncated continuous signature of time series
+###############################################################################
+function signature(P, M, dtype)
+
+	# Compute discrete derivative
+	p = discrete_derivative(P, dtype)
+
+	# Get size of path signature
+	T, N = size(p)
+
+	# Initialize tensor algebra
+	sig1 = initialize_TA(N, M)
+	sig2 = initialize_TA(N, M)
+	# lastsig = initialize_TA(N,M)
+	cur_exp = initialize_TA(N, M) # variable for the current tensor exponent
+
+	# Initialize first time segment
+	tensor_exp!(sig1,p[1,:], M)
+
+	for t = 2:T
+		tensor_exp!(cur_exp, p[t,:], M)
+		if mod(t, 2) == 0
+			multiply_TA!(sig2, sig1, cur_exp, M)
+		else
+			multiply_TA!(sig1, sig2, cur_exp, M)
+		end
+	end
+
+	if mod(T,2) == 0
+		return sig2
+	else
+		return sig1
+	end
+
+end
+
+
+###############################################################################
+# Function: dsignature 
+# Description: Computes the discrete approximation of the path signature.
+# Input 
+#	P: time series
+#		(T+1, N) array if dtype = "R"
+#		(T+1, b, b) or T(b, b, d) array if dtype = "SO"
+#	M: truncation level 
+#	dtype: type of time series, currently implemented:
+#		"R": real valued time series
+#		"SO": SO(b)^d valued time series (possibly with d = 1)
+# Output 
+#	S: discrete signature truncated at level m
+###############################################################################
+function dsignature(P, M, dtype)
+
+	# Compute discrete derivative
+	p = discrete_derivative(P, dtype)
+
+	# Get size of path signature
+	T, N = size(p)
+
+	# Initialize the tensor algebra element as an array of arrays
+	S = initialize_TA(N, M)
+
+	for i = 1:N
+	    cur_ind = zeros(Int, M)
+	    cur_ind[1] = i
+	    Q = cumsum(view(p,:,i))
+	    S[1][i] = Q[end]
+
+	    dsig_forward(S, Q, p, cur_ind, 2, M, N)
+	end
+
+	return S
+end
+
+
+###############################################################################
+# Function: dsig_forward 
+# Description: The forward recursion step in the discrete signature function.
+# Input 
+#	S: current signature 
+#	lastQ: last signature path
+#	p: discrete derivative
+#	cur_ind: current signature index
+#	cur_level: current level
+#	last_level: truncation level
+#	N: dimension of Lie group
+###############################################################################
+function dsig_forward(sigl, lastQ, p, cur_ind, cur_level, last_level, N)
+
+    if cur_level < last_level
+
+        for i = 1:N-1
+            cur_ind[cur_level] = i
+            Q = cumsum(lastQ .* view(p,:,i))
+            sigl[cur_level][cur_ind[1:cur_level]...] = Q[end]
+
+            dsig_forward(sigl, Q, p, cur_ind, cur_level+1, last_level, N)
+        end
+
+        # On the last run through, we no longer need the information from
+        # lastQ, so just use that variable instead of allocating more memory
+        cur_ind[cur_level] = N
+        cumsum!(lastQ, lastQ .* view(p,:,N))
+        sigl[cur_level][cur_ind[1:cur_level]...] = lastQ[end]
+
+        dsig_forward(sigl, lastQ, p, cur_ind, cur_level+1, last_level, N)
+    else
+
+        for i = 1:N
+            cur_ind[cur_level] = i
+            sigl[cur_level][cur_ind...] = sum(lastQ .* view(p,:,i))
+        end
+    end
+end
+
+
+###############################################################################
+# Function: dsignature_kernel 
+# Description: Computes the normalized discrete signature kernel for two paths. 
+# Input 
+#	P1, P2: two time series
+#	M: truncation level
+#	dtype: type of time series
+# Output 
+#	K: kernel value
+###############################################################################
+function dsignature_kernel(P1, P2, M, dtype)
+
+    p1 = discrete_derivative(P1, dtype)
+    p2 = discrete_derivative(P2, dtype)
+
+    return dsignature_kernel_preprocessed(p1, p2, M)
+end
+
+
+###############################################################################
+# Function: dsignature_kernel_preprocessed
+# Description: Computes the normalizeddiscrete signature kernel for two paths,
+#	where the discrete derivative has been precomputed
+# Input 
+#	p1, p2: discrete derivatives for two time series
+#	M: truncation level
+# Output 
+#	K: kernel value
+###############################################################################
+function dsignature_kernel_preprocessed(p1, p2, M)
+    T1, N1 = size(p1)
+    T2, N2 = size(p2)
+
+    if N1 != N2
+    	error("Time series dimensions are not equal.")
+    else
+    	N = N1
+    end
+
+    # Compute the tensor normalization
+    coeff1 = zeros(M+1)
+    coeff2 = zeros(M+1)
+
+    # Compute normalization for P1
+    K = p1*p1'
+    A = deepcopy(K)
+    coeff1[2] = sum(view(A,:))
+
+    for i = 2:M   
+        cumsum!(A,A,dims=1)
+        cumsum!(A,A,dims=2)
+        A =  @. K*(1 + A)
+        coeff1[i+1] = sum(view(A,:))
+    end
+    norm1 = coeff1[end] + 1
+    c1 = coeff1[2:end] - coeff1[1:end-1]
+    f1(x) = sum(c1.*(x.^((1:M)*2))) + 1 - PHI(sqrt(norm1),4.,1.)
+    lambda1 = find_zero(f1, (0., max(2.,norm1)))
+
+    # Compute normalization for P2
+    K = p2*p2'
+    A = deepcopy(K)
+    coeff2[2] = sum(view(A,:))
+
+    for i = 2:M   
+        cumsum!(A,A,dims=1)
+        cumsum!(A,A,dims=2)
+        A =  @. K*(1 + A)
+        coeff2[i+1] = sum(view(A,:))
+    end
+    norm2 = coeff2[end] + 1
+    c2 = coeff2[2:end] - coeff2[1:end-1]
+    f2(x) = sum(c2.*(x.^((1:M)*2))) + 1 - PHI(sqrt(norm2),4.,1.)
+    lambda2 = find_zero(f2, (0., max(2.,norm2)))
+
+    # coefficient
+    ll = lambda1*lambda2
+
+    # Compute normalized kernel
+    K = p1*p2'
+    A = deepcopy(K)
+
+    for i = 2:M   
+        cumsum!(A,A,dims=1)
+        cumsum!(A,A,dims=2)
+        if i==2
+            A = @. K*(ll^(M-1) + A*ll^M)
+        else
+            A = @. K*(ll^(M-i+1) + A)
+        end
+    end
+
+    K = 1 + sum(view(A,:))
+
+    return K
+end
+
+
+###############################################################################
+# Function: dsignature_gram_matrix
+# Description: Computes the gram matrix for two batches of time series, using
+#	the normalized discrete signature kernel. 
+# Input 
+#	BP1, BP2: two batches of time series
+#	M: truncation level
+#	dtype: type of time series
+# Output 
+#	K: gram matrix
+###############################################################################
+function dsignature_gram_matrix(BP1, BP2, M, dtype)
+
+	# Compute all discrete derivatives
+    bp1 = batch_discrete_derivative(BP1, dtype)
+    bp2 = batch_discrete_derivative(BP2, dtype)
+
+    S1 = length(bp1)
+    S2 = length(bp2)
+
+    K = zeros(S1, S2)
+
+    for i = 1:S1
+    	for j = 1:S2
+    		K[i,j] = dsignature_kernel_preprocessed(bp1[i], bp2[j], M)
+    	end
+    end
+
+    return K
+end
+
+
+###############################################################################
+# Function: dsignature_MMDu
+# Description: Computes the unbiased maximum mean discrepancy (MMD).
+# Input 
+#	BP1, BP2: two batches of time series
+#	M: truncation level
+#	dtype: type of time series
+# Output 
+#	MMD_val: MMD value
+###############################################################################
+function dsignature_MMDu(BP1, BP2, M, dtype)
+
+	# Compute all discrete derivatives
+    bp1 = batch_discrete_derivative(BP1, dtype)
+    bp2 = batch_discrete_derivative(BP2, dtype)
+
+    S1 = length(bp1)
+    S2 = length(bp2)
+
+    # Compute MMD
+    MMD_val1 = 0.0
+    MMD_val2 = 0.0
+    MMD_val3 = 0.0
+
+    for i = 1:S1-1	
+        for j = i+1:S1
+        	MMD_val1 += dsignature_kernel_preprocessed(bp1[i], bp1[j], M)
+        end
+    end
+
+    for i = 1:S2-1
+        for j = i+1:S2
+        	MMD_val2 += dsignature_kernel_preprocessed(bp2[i], bp2[j], M)
+        end
+    end
+
+    for i = 1:S1
+        for j = 1:S2
+        	MMD_val3 += dsignature_kernel_preprocessed(bp1[i], bp2[j], M)
+        end
+    end
+
+    MMD_val = MMD_val1*2/(S1*(S1-1)) + MMD_val2*2/(S2*(S2-1)) - MMD_val3*2/(S1*S2)
+
+    return MMD_val
+end
