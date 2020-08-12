@@ -4,11 +4,11 @@ This repo contains Julia code to compute path signatures and related functions f
 
 ## Usage
 
-Download the file and import the package as usual:
+Download the file and import the package as usual:  
 `include("PathSignatures.jl")`
 
-The primary functions are `signature()` and `dsignature()`, which computes the truncated continuous and discrete path signatures. The function signatures along with the inputs/outputs are:
-`signature(P, M, dtype)`
+The primary functions are `signature()` and `dsignature()`, which computes the truncated continuous and discrete path signatures. The function signatures along with the inputs/outputs are:  
+`signature(P, M, dtype)`  
 `dsignature(P, M, dtype)`
 - `P` is a multi-dimensional array which represents the path. The first dimension is always the time points, and the remaining dimensions are used to represent the point at a given time. For example, an `N` dimensional Euclidean path of length `T` is a `T x N` array, while a path of length `T` in SO(n)<sup>d</sup> is a `T x n x n x d` array.
 - `M` is the truncation level of the signature
